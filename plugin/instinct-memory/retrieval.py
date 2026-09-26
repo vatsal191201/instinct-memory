@@ -53,8 +53,7 @@ def query_tokens(query: str, *, keep_stopwords: bool = False) -> List[str]:
     if keep_stopwords:
         return tokens
     filtered = [t for t in tokens if t not in STOPWORDS]
-    # A query of pure stopwords ("what about it") still deserves an attempt.
-    return filtered or tokens
+    return filtered
 
 
 def _fact_lines(rec: Record) -> List[str]:
