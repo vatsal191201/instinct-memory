@@ -2,7 +2,9 @@
 
 A memory provider for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that stores durable facts in git-tracked Markdown records. Keyword and alias retrieval keep the store inspectable without embeddings; the agent proposes changes and a nightly reconciler writes them. The architecture is modeled on Instinct, an iMessage assistant, as described in [Dhravya Shah's teardown](https://x.com/dhravyashah/status/2101745550752428340).
 
-![demo](docs/demo.gif)
+![instinct-memory demo](docs/demo.gif)
+
+[Full-quality video (22 s, 1080p)](docs/demo.mp4). Every screen in it is real output from this repo's code running against the fictional example vault in `examples/vault`.
 
 ## How it works
 
