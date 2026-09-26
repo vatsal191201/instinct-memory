@@ -1,0 +1,6 @@
+name: instinct-memory
+version: 0.1.0
+description: "Instinct-style memory — git-tracked markdown records with a profile + alias-indexed keyword retrieval, read-only to the agent and reconciled nightly."
+author: The instinct-memory authors
+hooks:
+  - on_session_end
