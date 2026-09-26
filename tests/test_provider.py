@@ -1,5 +1,6 @@
 import json
-from unittest.mock import Mock
+import os
+from unittest.mock import Mock, patch
 
 from _support import VaultTestCase, plugin
 
@@ -78,3 +79,12 @@ class ProviderTests(VaultTestCase):
         for tool in ('fact_store', 'fact_feedback'):
             self.assertEqual(self.call(tool, action='probe'), {'status': 'ok'})
             delegate.handle_tool_call.assert_called_with(tool, {'action': 'probe'})
+
+    def test_home_relative_vault_is_available(self):
+        provider = plugin.InstinctMemoryProvider(config={
+            'vault_path': '~/vault', 'keep_holographic': False})
+        with patch.dict(os.environ, {'HOME': str(self.temp)}):
+            self.assertTrue(provider.is_available())
+            provider.initialize('test-home', hermes_home=str(self.hermes_home))
+            self.assertEqual(provider._vault.root, self.vault_path)
+        provider.shutdown()

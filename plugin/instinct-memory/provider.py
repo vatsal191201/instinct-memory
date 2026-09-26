@@ -140,7 +140,8 @@ def _load_plugin_config() -> dict:
 
 
 def _expand(path: str, hermes_home: str) -> str:
-    return str(path).replace("$HERMES_HOME", hermes_home).replace("${HERMES_HOME}", hermes_home)
+    expanded = str(path).replace("$HERMES_HOME", hermes_home).replace("${HERMES_HOME}", hermes_home)
+    return str(Path(expanded).expanduser())
 
 
 class InstinctMemoryProvider(MemoryProvider):

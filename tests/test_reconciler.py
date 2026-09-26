@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from unittest.mock import patch
 
 from _support import VaultTestCase
@@ -109,3 +110,7 @@ class ReconcilerTests(VaultTestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         prompt, _ = self.rc.build_prompt(self.rc.Vault(self.vault_path), DAY, max_records=25)
         self.assertIn('Sam prefers tea on Fridays.', prompt)
+
+    def test_home_relative_vault_override(self):
+        with patch.dict(os.environ, {'HOME': str(self.temp), 'INSTINCT_VAULT': '~/vault'}):
+            self.assertEqual(self.reconciler().VAULT_ROOT, self.vault_path)
