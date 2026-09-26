@@ -33,11 +33,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-PLUGIN_DIR = HERMES_HOME / "plugins" / "instinct-memory"
+_BUNDLED_PLUGIN = Path(__file__).resolve().parents[1] / "plugin" / "instinct-memory"
+PLUGIN_DIR = _BUNDLED_PLUGIN if _BUNDLED_PLUGIN.is_dir() else HERMES_HOME / "plugins" / "instinct-memory"
 VAULT_ROOT = Path(os.environ.get("INSTINCT_VAULT") or HERMES_HOME / "memory-vault")
 LOG_PATH = VAULT_ROOT / "raw" / "reconcile.log"
-
-sys.path.insert(0, str(HERMES_HOME / "hermes-agent"))
 
 import importlib.util  # noqa: E402
 

@@ -151,7 +151,10 @@ def split_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
     raw_fm = parts[0][3:].strip()
     body = parts[1].lstrip("-\n")
     try:
-        import yaml
+        try:
+            import yaml
+        except ImportError:
+            from . import _frontmatter as yaml
 
         data = yaml.safe_load(raw_fm) or {}
     except Exception as exc:  # pragma: no cover - malformed yaml
@@ -238,7 +241,10 @@ def parse_record(text: str, path: Optional[str] = None) -> Record:
 def render_record(rec: Record) -> str:
     """Serialise a Record back to markdown. Always emits the canonical shape so a
     rewrite of an untouched record is a no-op diff."""
-    import yaml
+    try:
+        import yaml
+    except ImportError:
+        from . import _frontmatter as yaml
 
     fm = {
         "id": rec.id,
