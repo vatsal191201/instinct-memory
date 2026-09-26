@@ -495,13 +495,15 @@ def apply_plan(vault: Vault, plan: Dict[str, Any], *, dry_run: bool) -> Tuple[in
                         rec.links.extend(new_links)
                         vault.write(rec)
                 else:  # shorten — sanctioned by the design, but history must survive
-                    keep = [f for f in rec.facts if f.superseded_on or f.corrects_on]
-                    replacement = [sch.build_fact(date.today().isoformat(), str(t).strip())
-                                   for t in (edit.get("facts") or []) if str(t).strip()]
-                    log(f"  [shorten] {rec.id}: {len(rec.facts)} -> {len(replacement) + len(keep)} facts (kept {len(keep)} historical)")
+                    # The legacy operation may shorten prose, but cannot replace facts.
+                    # The writer rejects any supplied facts that would erase history.
                     if not dry_run:
-                        rec.facts = keep + replacement
-                        vault.write(rec, force=True)
+                        if edit.get("facts"):
+                            rec.facts = [sch.build_fact(date.today().isoformat(), str(t).strip())
+                                         for t in edit["facts"] if str(t).strip()]
+                        if edit.get("prose"):
+                            rec.prose = str(edit["prose"]).strip()
+                        vault.write(rec)
             else:
                 problems.append(f"unknown op {op!r}")
                 continue

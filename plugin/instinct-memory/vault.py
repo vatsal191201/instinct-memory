@@ -10,9 +10,8 @@ Two invariants are enforced here rather than left to callers:
    then ``os.replace``d into place, under a per-record ``flock``. A crash mid-write leaves
    the previous record intact. This is the whole reason a markdown directory survives
    concurrent writers.
-2. **No silent history loss.** A write that drops a dated fact line must supply a
-   correction line for it, or it is refused. ``force=True`` is the only override, and the
-   reconciler is the only caller allowed to pass it.
+2. **No silent history loss.** Every dated fact must survive unchanged or with a
+   superseded annotation and a dated correction. No caller can bypass this invariant.
 """
 
 from __future__ import annotations
@@ -315,8 +314,8 @@ class Vault:
     def write(self, rec: Record, *, force: bool = False) -> Path:
         """Persist a record atomically.
 
-        Refuses to drop a dated fact line unless a correction line for it is present (or
-        ``force=True``). Refuses to write a record whose body exceeds the size cap — the
+        Refuses to drop any dated fact line, including when ``force=True`` is supplied
+        by an older caller. Corrections preserve and annotate the original line. Refuses to write a record whose body exceeds the size cap — the
         reconciler must shorten and link out instead, exactly like Instinct does.
         """
         if len(rec.body) > self.max_record_chars:
@@ -324,25 +323,30 @@ class Vault:
                 f"{rec.id}: body is {len(rec.body)} chars (cap {self.max_record_chars}). "
                 "Shorten it and push detail into a linked note instead of raising the cap."
             )
-        previous = self._disk_record(rec.id)
-        if previous is not None and not force:
-            old_facts = {f.render() for f in previous.facts}
-            new_facts = {f.render() for f in rec.facts}
-            dropped = old_facts - new_facts
-            if dropped:
-                corrected = {f.corrects_on for f in rec.facts if f.corrects_on}
-                old_dates = {f.date for f in previous.facts if f.render() in dropped}
-                uncorrected = old_dates - corrected
-                if uncorrected:
-                    raise RecordError(
-                        f"{rec.id}: write would drop dated fact(s) from {sorted(uncorrected)} with no "
-                        "correction line. Annotate the old line with [!superseded <date>] and add a "
-                        f"correction carrying [corrects {sorted(uncorrected)[0]}] instead (or pass force=True)."
-                    )
         rec.updated = today()
         rec.created = rec.created or today()
         path = self.path_for(rec)
         with self.lock(f"record-{rec.id}", blocking=True):
+            previous = self._disk_record(rec.id)
+            if previous is not None:
+                new_lines = {f.render() for f in rec.facts}
+                for old in previous.facts:
+                    if old.render() in new_lines:
+                        continue
+                    # A correction may append an annotation to the exact old text;
+                    # a correction date alone never authorizes dropping that text.
+                    preserved = any(
+                        f.superseded_on and not old.superseded_on
+                        and f.render() == old.render() + f" [!superseded {f.superseded_on}]"
+                        and any(c.corrects_on == old.date and c.date == f.superseded_on
+                                for c in rec.facts)
+                        for f in rec.facts
+                    )
+                    if not preserved:
+                        raise RecordError(
+                            f"{rec.id}: write would drop a dated fact from {old.date}. "
+                            "Keep the old line, mark it superseded, and add a dated correction."
+                        )
             self._atomic_write(path, render_record(rec))
         self._cache = None
         return path
