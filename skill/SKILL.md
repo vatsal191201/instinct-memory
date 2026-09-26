@@ -1,6 +1,6 @@
 ---
 name: instinct-memory
-description: Use when recalling durable memory. The vault is read-only.
+description: Recall durable memory through read-only vault tools and propose changes for the reconciler.
 version: 1.0.0
 author: The instinct-memory authors
 license: Apache-2.0
@@ -9,70 +9,54 @@ metadata:
   hermes:
     tags: [memory, instinct, vault, aliases, reconciler, read-only, markdown]
     category: productivity
-    related_skills: [agent-memory-curation, hermes-agent]
 ---
 
 # Instinct Memory
 
-Durable memory as git-tracked markdown: interlinked records with dated facts, an injected
-profile, and alias-driven keyword retrieval (no embeddings). Its defining property is that
-**you read it, you never write it** — a nightly reconciler is the only writer. The records
-are the source of truth; the injected profile is a summary of them.
+Durable memory lives in git-tracked Markdown records with dated facts, lowercase aliases,
+and links. Records are the source of truth. A profile and index are injected once per
+conversation; verify details with a record before answering.
 
-## When to Use
+## When to use
 
-- Before answering anything about the user, their people, projects, preferences, or past
-  decisions — `memory_search` first, don't answer from the profile alone.
-- When a nickname, abbreviation, or "who/what is X" comes up — resolve it against the vault.
-- When the user says "remember this" or states something durable — propose it with
-  `memory_note`.
-- When operating or validating the store by hand — running the reconciler, adding a record,
-  or correcting a fact.
+- Search before answering about the user, their people, projects, preferences, or past decisions.
+- Resolve nicknames and abbreviations through aliases.
+- When the user says "remember this", propose a durable fact with `memory_note`.
 
-For choosing *which* memory store a fact belongs in (flat memory vs fact store vs vault vs
-skills), see the `agent-memory-curation` skill. This skill is about operating the vault.
+## Tools
 
-## Overview — read-only to you, reconciler-owned
+- `memory_search(query, limit?, type?)`: ranked keyword and alias matches.
+- `memory_read(id_or_name)`: full record, including superseded facts and corrections.
+- `memory_index(type?)`: ids, names, aliases, update dates, and fact counts.
+- `memory_timeline(period?, date?, limit?)`: daily or weekly chronology.
+- `memory_note(text, about?)`: append a proposal to the reconciler inbox.
 
-The agent surface is five tools, all read-only except a proposal queue:
+There is no record-write tool. Do not create, edit, or delete vault records as part of a
+conversation. The nightly reconciler owns those writes. `memory_note` does not immediately
+change a record; do not claim that it does.
 
-- `memory_search` — alias-aware keyword recall; returns id, type, and best dated fact lines.
-- `memory_read` — one full record: frontmatter, every fact (incl. superseded + corrections),
-  links.
-- `memory_index` — every record's id / name / aliases / updated / fact count.
-- `memory_timeline` — daily / weekly rollups of what happened.
-- `memory_note` — a **proposal** to the reconciler's inbox. Not a write.
+If `keep_holographic` is enabled, `fact_store` and `fact_feedback` operate on a separate
+SQLite store. Hermes's built-in memory tool is also separate. They can provide immediate
+memory, but do not directly edit the vault.
 
-You cannot create, edit, or delete a record through any tool. Durable writes happen only when
-the reconciler runs (nightly via cron, or by hand). Trust the records over the profile: when
-the injected summary and a record disagree, the record wins.
+## Search by the user's words
 
-## Paths and layout
+The example vault is fictional. These queries illustrate alias retrieval:
 
-```
-~/.hermes/memory-vault/            # the vault (git repo; $HERMES_HOME/memory-vault)
-  PROFILE.md                       # injected at session start (life context / autonomy / style)
-  INDEX.md                         # generated one-line-per-record index, injected with PROFILE
-  ONEPAGER.md                      # "what's going on right now" — refreshed nightly
-  TASKS.md                         # open loops — injected
-  records/<type>/<ID>.md           # type ∈ preference | person | organization | workstream
-  timeline/daily/<YYYY-MM-DD>.md   # reconciler rollups
-  timeline/weekly/<YYYY-Www>.md
-  raw/<YYYY-MM-DD>.jsonl           # append-only turn capture (reconciler input; never rewritten)
-  raw/inbox.jsonl                  # memory_note proposals, consumed each reconcile
-  raw/memory_tool_writes.jsonl     # mirror of built-in memory-tool writes
-~/.hermes/plugins/instinct-memory/ # the MemoryProvider
-~/.hermes/scripts/instinct_reconcile.sh   # reconciler (cron wrapper) + instinct_reconcile.py
+```text
+memory_search(query="jj")            -> PERS-june
+memory_search(query="the pm")        -> PERS-june
+memory_search(query="sam's coffee")  -> PREF-coffee
+memory_search(query="api cutover")   -> WS-lighthouse
+memory_search(query="the office")    -> ORG-tidewater-labs
 ```
 
-Config lives in `~/.hermes/config.yaml`: `memory.provider: instinct-memory` (the activation
-key is the plugin **directory** name), and `plugins.instinct-memory.*`
-(`vault_path`, `profile_max_chars`, `prefetch_records`, `max_record_chars`, `keep_holographic`).
-Inspect the vault directly with `read_file` / `search_files` against `records/`.
+After a match, use `memory_read(id_or_name="PERS-june")` for the full record.
+A search miss does not establish that a fact is absent: synonyms outside the aliases will
+not match. Inspect `memory_index`, then search a stored term or read the record directly.
+Use `memory_timeline` for questions about what happened on a day or during a week.
 
-## The record contract
-
-Frontmatter is YAML starting at byte 0, then a `# Name`, one-line prose, `## Facts`, `## Links`:
+## Record contract
 
 ```markdown
 ---
@@ -83,140 +67,87 @@ aliases:
 - jj
 - the pm
 type: person
-created: '2026-01-15'
-updated: '2026-02-02'
+created: '2026-08-02'
+updated: '2026-08-02'
 sources:
-- seed:memory
+- chat:2026-08-02
 ---
 
 # June
 
-One-line prose describing who/what this is.
+PM on Lighthouse.
 
 ## Facts
-- (2026-01-15) A durable, dated fact.
-- (2026-01-15) Old value [!superseded 2026-02-02]
-- (2026-02-02) Correction: new value [corrects 2026-01-15]
+- (2026-08-02) PM for Lighthouse. Runs the Thursday sync.
 
 ## Links
-- [[PERS-sam]]
-- [[PREF-coffee]]
+- [[WS-lighthouse]]
+- [[ORG-tidewater-labs]]
 ```
 
-Rules enforced mechanically:
+Ids use `<PREFIX>-<lowercase-kebab-slug>`. Prefixes are `PERS` (person), `PREF`
+(preference), `ORG` (organization), and `WS` (workstream). Aliases must be lowercase.
+Every fact bullet begins `- (YYYY-MM-DD)`. Links must resolve to existing records.
 
-- **id = `<PREFIX>-<kebab-slug>`**, PREFIX ∈ `PREF` (preference), `PERS` (person),
-  `ORG` (organization), `WS` (workstream). The prefix must match `type`.
-- **aliases are lowercase** and are the single most important field — they are what makes
-  keyword search find a record under the user's own wording.
-- **every fact line is dated: `- (YYYY-MM-DD) text`.** An undated bullet fails validation.
-- **corrections never delete.** The old line is annotated in place with `[!superseded <date>]`
-  and a new dated line carries `Correction: … [corrects <old-date>]`.
-- **body size is capped** (`max_record_chars`, ~8000). Over it, the reconciler shortens the
-  record and links detail out — you cannot just grow one.
+Corrections preserve history:
 
-## Searching well — aliases are the point
-
-Aliases exist so you can search the **user's own words**, not the formal name. Always try
-nicknames, abbreviations, and alternative spellings, and let the alias resolve:
-
-```
-memory_search(query="the pm")            # -> PERS-june   (also "jj", "jj")
-memory_search(query="the office")       # -> ORG-tidewater-labs    (also "work", "tidewater")
-memory_search(query="api cutover")         # -> WS-lighthouse
-memory_search(query="lighthouse")          # -> WS-lighthouse
+```markdown
+- (2026-03-14) Oat flat white, extra hot. [!superseded 2026-09-26]
+- (2026-09-26) Correction: Decaf oat flat white, extra hot. [corrects 2026-03-14]
 ```
 
-Punctuation-heavy handles resolve too (`sam`, `june`, `lh`). Then
-`memory_read(id_or_name="June")` for the full record.
+The writer rejects deletion of dated facts, even with `force=True`. It validates the new
+serialized content and enforces the body size cap. A structured plan that fails validation
+is rejected before publication.
 
-**When a search comes back empty, do not conclude "not in memory."** Retrieval is keyword +
-alias only (no embeddings), so a synonym the record doesn't list won't match. Call
-`memory_index` to see every record with its aliases, find the right term, and search again —
-or read the record directly. The empty-result hint says exactly this. Use `memory_timeline`
-for "what did we do last week" chronology.
+## Store and configuration
 
-## memory_note vs the built-in memory tool vs fact_store
+```text
+$HERMES_HOME/memory-vault/
+  PROFILE.md                      operator-maintained profile
+  INDEX.md                        generated record index
+  ONEPAGER.md, TASKS.md            optional semantic summaries; not injected
+  records/<type>/<ID>.md           durable facts
+  timeline/daily/<YYYY-MM-DD>.md   daily rollups
+  timeline/weekly/<YYYY-Www>.md    weekly rollups
+  raw/<YYYY-MM-DD>.jsonl           captured turns
+  raw/inbox.jsonl                 pending proposals
+  raw/inbox.processed.jsonl       archived, replayable proposals
+  raw/memory_tool_writes.jsonl    built-in memory write notifications
+```
 
-Three durable stores, routed by *when you need the fact back*, not by topic:
+`HERMES_HOME` defaults to `~/.hermes`. After the installer creates the activation alias,
+set `memory.provider` to `instinct`. A manual copy without that alias uses `instinct-memory`.
+Provider settings live under `plugins.instinct-memory`: `vault_path`, `profile_max_chars`,
+`prefetch_records`, `max_record_chars`, and `keep_holographic`.
 
-- **`memory_note(text, about?)`** — appends to `raw/inbox.jsonl` as a proposal. It does **not**
-  take effect this turn and **cannot be read back** until the next reconcile. Use it for
-  durable, long-term facts about the user's world (people, projects, preferences, decisions):
-  *"remember that …"*.
-- **built-in `memory` tool** — the always-on flat memory (injected every turn). Immediate and
-  readable this session. Use it for something you need **right now** or standing operational
-  state.
-- **`fact_store`** (holographic delegate, kept working via `keep_holographic`) — structured
-  SQLite facts with entity resolution and compositional retrieval (`probe`, `reason`,
-  `contradict`). Immediate; a separate store from the vault. Rate facts with `fact_feedback`.
+## Operator reconciliation
 
-Rule of thumb: need it this turn → `memory` or `fact_store`; want it in the durable narrative
-record → `memory_note`.
-
-## Operating the reconciler
-
-The reconciler is the only sanctioned writer. Two layers: **A** (deterministic — roll up raw
-turns to daily/weekly, rebuild `INDEX.md`, validate, commit) and **B** (ask a coding CLI for a
-structured edit plan, validate it against the contract, apply it through the vault's writer
-functions — the model never touches a file directly).
+Run the reconciler when requested as an operator task; ordinary conversation proposals
+should use `memory_note`.
 
 ```bash
-# Validate only — fast, deterministic, no LLM. Use this to check the vault is well-formed.
-~/.hermes/scripts/instinct_reconcile.sh --no-llm --dry-run --verbose
+# Offline preview: validate and build projections in a temporary copy.
+"${HERMES_HOME:-$HOME/.hermes}/scripts/instinct_reconcile.sh" --no-llm --dry-run --verbose
 
-# Dry-run including the LLM plan (still writes nothing durable, makes no commit).
-~/.hermes/scripts/instinct_reconcile.sh --dry-run --verbose
+# Preview including a Claude Code structured edit plan.
+"${HERMES_HOME:-$HOME/.hermes}/scripts/instinct_reconcile.sh" --dry-run --verbose
 
-# Real run (the writer). Normally cron does this nightly; run by hand only deliberately.
-~/.hermes/scripts/instinct_reconcile.sh
-
-# Reconcile a specific day.
-~/.hermes/scripts/instinct_reconcile.sh --date 2026-02-01
+# Full run for one day.
+"${HERMES_HOME:-$HOME/.hermes}/scripts/instinct_reconcile.sh" --date 2026-09-26 --verbose
 ```
 
-Exit codes: `0` ok, `1` validation problems, `2` nothing to do, `3` error. A `--dry-run`
-regenerates the `INDEX.md`/timeline projections but makes no commit and edits no records.
-Each real run is a git commit — `git -C ~/.hermes/memory-vault log --oneline` is the receipt.
+For a custom `vault_path`, set `INSTINCT_VAULT` to the same location. The script does not
+read provider configuration. `INSTINCT_CLAUDE_BIN` can select the Claude Code executable.
 
-**Adding a record safely.** You do not create records directly. Either `memory_note` the fact
-(the reconciler creates or updates the record on its next run), or let a real reconcile
-compose the `create`/`add_facts`/`link` ops from the day's activity. If an operator must create
-one by hand, write `records/<type>/<PREFIX>-<slug>.md` to the contract above, then run
-`instinct_reconcile.sh --no-llm --dry-run --verbose` and confirm `validation: 0 problems`
-before committing — but prefer the reconciler ops over raw editing.
+The deterministic layer builds timelines, rebuilds the index, validates, and commits.
+The semantic layer requests JSON with tools disabled, validates the plan in a copy,
+applies atomic writes, and commits. A dry run leaves the target vault untouched.
 
-**Correcting a fact.** Never overwrite or delete a dated line. Supersede it and add a dated
-correction — the reconciler's `correct_fact` op does this: it annotates the old line
-`[!superseded <date>]` and appends `- (<date>) Correction: <new> [corrects <old-date>]`. The
-writer **refuses** any write that drops a dated fact without a matching `[corrects <date>]`.
+Notes are archived only after committed work, and only for the selected snapshot/day.
+`--no-llm` archives notes as timeline input without updating records. Archived notes remain
+available to a later full run of the same date. Other dates and newly arriving notes remain
+queued. A full run without a valid Claude plan retains pending notes.
 
-## Common Pitfalls
-
-- **Hand-editing a record to reword or drop a dated fact without a `[corrects <date>]` line**
-  breaks the correction/versioning invariant — the writer raises `RecordError` and rejects it.
-  Add the correction line; do not route around the guard.
-- **`force=True` is not an escape hatch.** It exists solely for the reconciler's sanctioned
-  `shorten` op, which still keeps every superseded and correction line. Never use it to push a
-  normal edit past the history guard.
-- **A search miss is not "unknown."** The fact is probably stored under a different alias — use
-  `memory_index`, then search the term you find.
-- **`memory_note` is not immediate** — it won't read back this turn; it lands at the next
-  reconcile. If you need the fact this session, also use the built-in `memory` tool.
-- **Don't treat the profile as ground truth.** `PROFILE.md` / `ONEPAGER.md` / `INDEX.md` are
-  generated summaries; verify at the record before acting on anything load-bearing.
-- **Don't hand-edit the projections.** `INDEX.md`, `timeline/`, and `PROFILE.md` are
-  regenerated by the reconciler; edits are lost. Change records, not projections.
-- **Leave the git tree clean.** The vault is a git repo — commit or revert your changes, and
-  never rewrite published history.
-
-## Verification Checklist
-
-- `memory_search` on a nickname the user actually uses returns the right record.
-- If a search is empty, `memory_index` shows the record under some alias; a re-search on that
-  alias hits.
-- `instinct_reconcile.sh --no-llm --dry-run --verbose` exits `0` or `2` and prints
-  `validation: 0 problems`.
-- After a real reconcile, `git -C ~/.hermes/memory-vault log --oneline` shows a new commit.
-- A fact proposed with `memory_note` appears as a record **only after** the next reconcile —
-  not the same turn.
+Exit codes: `0` completed, `1` validation failure, `2` lock already held, `3` runtime error.
+Review commits and record corrections after a run. Never rewrite published history.

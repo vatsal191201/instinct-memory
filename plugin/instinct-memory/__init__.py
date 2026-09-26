@@ -5,10 +5,10 @@ Dhravya Shah): a directory of interconnected markdown records, a profile injecte
 start of every conversation, keyword retrieval backed by aliases rather than embeddings,
 read-only memory for the agent, and a nightly background process that owns every write.
 
-Activate with ``memory.provider: instinct-memory`` in config.yaml (the plugin's directory
-name is the activation key; ``provider.name`` is the shorter ``instinct``). The plugin composes the
-holographic SQLite fact store in as a delegate (``keep_holographic: true``) so
-``fact_store`` / ``fact_feedback`` keep working.
+After install.sh, activate with ``memory.provider: instinct``. The installer supplies
+an ``instinct`` directory alias for Hermes discovery; a manual drop-in copy uses the
+``instinct-memory`` directory key. Optional ``keep_holographic: true`` preserves the
+separate holographic ``fact_store`` / ``fact_feedback`` tools.
 """
 
 from __future__ import annotations
