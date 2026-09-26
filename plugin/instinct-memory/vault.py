@@ -25,6 +25,7 @@ import os
 import re
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -485,29 +486,44 @@ class Vault:
                 continue
         return out
 
-    def consume_jsonl(self, name: str, *, archive_name: str = "inbox.processed.jsonl") -> int:
-        """Move a jsonl file's lines into the archive and truncate the original.
+    def consume_jsonl(
+        self, name: str, *, archive_name: str = "inbox.processed.jsonl",
+        entries: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> int:
+        """Archive only committed snapshot entries, preserving later appends and other days.
 
-        The read, archive and truncate all happen under the SAME lock ``append_raw`` uses for
-        this file (derived from ``name``, not hardcoded), so a line appended concurrently — a
-        ``memory_note`` flagged while the reconciler is consuming the inbox — cannot be lost
-        in the window between the read and the truncate.
-
-        Callers MUST have committed their work first: the truncate is the point of no return.
+        Call only after a successful commit. The same lock as append_raw covers the
+        read/archive/rewrite. Malformed lines remain queued for operator inspection.
         """
         path = self.layout.raw / name
+        wanted = None if entries is None else Counter(
+            json.dumps(entry, sort_keys=True, ensure_ascii=False) for entry in entries
+        )
         lock_name = "raw-" + name.replace(".jsonl", "")
         with self.lock(lock_name, blocking=True):
-            if not path.exists() or path.stat().st_size == 0:
+            if not path.exists():
                 return 0
-            lines = path.read_text(encoding="utf-8", errors="replace")
-            count = sum(1 for line in lines.splitlines() if line.strip())
-            if not count:
+            consumed, remaining = [], []
+            for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+                try:
+                    key = json.dumps(json.loads(line), sort_keys=True, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    remaining.append(line)
+                    continue
+                if wanted is None or wanted[key] > 0:
+                    consumed.append(line if line.endswith("\n") else line + "\n")
+                    if wanted is not None:
+                        wanted[key] -= 1
+                else:
+                    remaining.append(line)
+            if not consumed:
                 return 0
             with open(self.layout.raw / archive_name, "a", encoding="utf-8") as handle:
-                handle.write(lines if lines.endswith("\n") else lines + "\n")
-            self._atomic_write(path, "")
-        return count
+                handle.writelines(consumed)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._atomic_write(path, "".join(remaining))
+        return len(consumed)
 
     # --------------------------------------------------------------- timeline
 

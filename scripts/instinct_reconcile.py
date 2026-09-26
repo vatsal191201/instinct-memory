@@ -78,13 +78,24 @@ def log_error(msg: str) -> None:
 # --------------------------------------------------------------------------- Layer A
 
 
+def notes_for_day(vault: Vault, day: str) -> List[Dict[str, Any]]:
+    """Archived notes remain input so deterministic runs and later LLM replays agree."""
+    return [n for name in ("inbox.processed.jsonl", "inbox.jsonl")
+            for n in vault.read_jsonl(name) if str(n.get("ts", "")).startswith(day)]
+
+
+def archive_notes(vault: Vault, day: str, notes: List[Dict[str, Any]]) -> None:
+    # The caller has already committed the projections (and any semantic edits).
+    consumed = vault.consume_jsonl("inbox.jsonl", entries=notes)
+    if consumed:
+        log(f"  archived {consumed} inbox note(s)")
+        commit(vault, f"reconcile {day}: archive {consumed} consumed inbox note(s)")
+
+
 def rollup_day(vault: Vault, day: str) -> Optional[Path]:
     """Turn one day's raw JSONL into a timeline/daily/<day>.md rollup."""
     turns = vault.read_raw(day)
-    notes = [
-        n for n in vault.read_jsonl("inbox.jsonl")
-        if str(n.get("ts", "")).startswith(day)
-    ]
+    notes = notes_for_day(vault, day)
     memories = [
         m for m in vault.read_jsonl("memory_tool_writes.jsonl")
         if str(m.get("ts", "")).startswith(day)
@@ -420,7 +431,7 @@ def build_prompt(vault: Vault, day: str, *, max_records: int) -> Tuple[str, str]
     else:
         parts.append(f"\n===== timeline/daily/{day}.md =====\n(no activity recorded)")
 
-    notes = [n for n in vault.read_jsonl("inbox.jsonl") if str(n.get("ts", "")).startswith(day)]
+    notes = notes_for_day(vault, day)
     if notes:
         rendered = "\n".join(
             f"- {n.get('text')}" + (f"  [about: {n.get('about')}]" if n.get("about") else "") for n in notes
@@ -612,6 +623,8 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
 
     if args.no_llm:
         log("Layer B skipped (--no-llm)", always=True)
+        if not args.dry_run:
+            archive_notes(vault, day, pending_notes)
         return 0
 
     # ---- Layer B -----------------------------------------------------------
@@ -650,10 +663,7 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
     )
 
     # Only now is it safe to consume the inbox: the work is committed.
-    consumed = vault.consume_jsonl("inbox.jsonl")
-    if consumed:
-        log(f"  archived {consumed} inbox note(s)")
-        commit(vault, f"reconcile {day}: archive {consumed} consumed inbox note(s)")
+    archive_notes(vault, day, pending_notes)
 
     return 1 if post else 0
 
