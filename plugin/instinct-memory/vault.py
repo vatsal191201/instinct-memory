@@ -41,6 +41,7 @@ from .schema import (
     parse_record,
     render_record,
     slugify,
+    validate_record,
     validate_vault,
 )
 
@@ -318,9 +319,16 @@ class Vault:
         by an older caller. Corrections preserve and annotate the original line. Refuses to write a record whose body exceeds the size cap — the
         reconciler must shorten and link out instead, exactly like Instinct does.
         """
-        if len(rec.body) > self.max_record_chars:
+        rendered = render_record(rec)
+        candidate = parse_record(rendered)
+        problems = validate_record(candidate)
+        if [f.render() for f in candidate.facts] != [f.render() for f in rec.facts]:
+            problems.append("fact text must stay on a single dated line")
+        if problems:
+            raise RecordError(f"{rec.id}: " + "; ".join(problems))
+        if len(candidate.body) > self.max_record_chars:
             raise RecordError(
-                f"{rec.id}: body is {len(rec.body)} chars (cap {self.max_record_chars}). "
+                f"{rec.id}: body is {len(candidate.body)} chars (cap {self.max_record_chars}). "
                 "Shorten it and push detail into a linked note instead of raising the cap."
             )
         rec.updated = today()
@@ -419,7 +427,18 @@ class Vault:
         return rec
 
     def validate(self) -> List[str]:
-        return validate_vault(self.load(force=True))
+        records, problems = [], []
+        for path in self.record_paths():
+            try:
+                rec = parse_record(path.read_text(encoding="utf-8"), path=str(path))
+                records.append(rec)
+                if path.stem != rec.id or path.parent.name != rec.type:
+                    problems.append(f"{path.name}: path does not match record id/type")
+                if len(rec.body) > self.max_record_chars:
+                    problems.append(f"{rec.id}: body exceeds {self.max_record_chars} chars")
+            except (RecordError, OSError) as exc:
+                problems.append(f"{path.name}: {exc}")
+        return problems + validate_vault(records)
 
     # -------------------------------------------------------------------- raw
 

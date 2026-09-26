@@ -264,8 +264,6 @@ def render_record(rec: Record) -> str:
     chunks += ["", FACTS_HEADING]
     for fact in rec.facts:
         chunks.append(fact.render())
-    if not rec.facts:
-        chunks.append("- (no facts recorded yet)")
     if rec.links:
         chunks += ["", LINKS_HEADING]
         chunks.extend(f"- [[{link}]]" for link in rec.links)
@@ -312,7 +310,7 @@ def validate_record(rec: Record, known_ids: Optional[set] = None) -> List[str]:
                 problems.append("a fact is marked superseded but no correcting fact carries [corrects ...]")
 
     if known_ids is not None:
-        for link in rec.links:
+        for link in dict.fromkeys(rec.links + LINK_RE.findall(rec.body)):
             if link not in known_ids:
                 problems.append(f"dangling link [[{link}]] — no such record")
     return problems

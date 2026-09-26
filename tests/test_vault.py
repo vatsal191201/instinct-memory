@@ -2,6 +2,23 @@ from _support import VaultTestCase, schema
 
 
 class VaultTests(VaultTestCase):
+    def test_writer_rejects_invalid_id(self):
+        rec = self.vault.find('PERS-june')
+        rec.id = 'BAD-june'
+        with self.assertRaises(schema.RecordError):
+            self.vault.write(rec)
+
+    def test_size_cap_checks_new_content(self):
+        rec = self.vault.find('PERS-june')
+        rec.prose = 'x' * (self.vault.max_record_chars + 1)
+        with self.assertRaises(schema.RecordError):
+            self.vault.write(rec)
+
+    def test_unparseable_record_fails_validation(self):
+        path = self.vault_path / 'records/person/PERS-june.md'
+        path.write_text('broken frontmatter\n')
+        self.assertTrue(any('frontmatter' in p for p in self.vault.validate()))
+
     def test_correction_keeps_old_line(self):
         before = self.vault.find('PREF-mornings')
         old_line = before.facts[0].render()
