@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -141,7 +142,7 @@ def rollup_day(vault: Vault, day: str) -> Optional[Path]:
 
     path = vault.layout.daily / f"{day}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    vault._atomic_write(path, "\n".join(lines).rstrip() + "\n")
     log(f"  daily rollup: {path.name} ({len(turns)} turns)")
     return path
 
@@ -170,22 +171,22 @@ def rollup_week(vault: Vault, week: str) -> Optional[Path]:
         lines.append("")
     path = vault.layout.weekly / f"{week}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    vault._atomic_write(path, "\n".join(lines).rstrip() + "\n")
     log(f"  weekly rollup: {path.name} ({len(days)} days)")
     return path
 
 
 def rebuild_index(vault: Vault) -> None:
-    (VAULT_ROOT / "INDEX.md").write_text(vault.render_index_markdown(), encoding="utf-8")
+    vault._atomic_write(vault.root / "INDEX.md", vault.render_index_markdown())
     log("  INDEX.md rebuilt")
 
 
 def git(vault: Vault, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-c", "user.name=instinct-memory", "-c", "user.email=instinct-memory@users.noreply.github.com", *args], cwd=VAULT_ROOT, capture_output=True, text=True)
+    return subprocess.run(["git", "-c", "user.name=instinct-memory", "-c", "user.email=instinct-memory@users.noreply.github.com", *args], cwd=vault.root, capture_output=True, text=True)
 
 
 def ensure_git(vault: Vault) -> None:
-    if not (VAULT_ROOT / ".git").is_dir():
+    if not (vault.root / ".git").is_dir():
         git(vault, "init", "-q", "-b", "main")
         git(vault, "config", "user.name", "instinct-memory")
         git(vault, "config", "user.email", "instinct-memory@users.noreply.github.com")
@@ -391,11 +392,11 @@ def build_prompt(vault: Vault, day: str, *, max_records: int) -> Tuple[str, str]
     parts = [_render_prompt_header()]
 
     for filename in ("PROFILE.md", "ONEPAGER.md", "TASKS.md"):
-        path = VAULT_ROOT / filename
+        path = vault.root / filename
         if path.exists():
             parts.append(f"\n===== {filename} =====\n{path.read_text(encoding='utf-8')}")
 
-    index_path = VAULT_ROOT / "INDEX.md"
+    index_path = vault.root / "INDEX.md"
     if index_path.exists():
         parts.append(f"\n===== INDEX.md =====\n{index_path.read_text(encoding='utf-8')}")
 
@@ -516,7 +517,7 @@ def apply_plan(vault: Vault, plan: Dict[str, Any], *, dry_run: bool) -> Tuple[in
             text = plan.get(key)
             if isinstance(text, str) and text.strip():
                 body = text if text.lstrip().startswith("#") else f"# {filename.split('.')[0].title()}\n\n{text}"
-                (VAULT_ROOT / filename).write_text(body.rstrip() + "\n", encoding="utf-8")
+                vault._atomic_write(vault.root / filename, body.rstrip() + "\n")
                 log(f"  refreshed {filename}")
     return applied, problems
 
@@ -525,7 +526,7 @@ def apply_plan(vault: Vault, plan: Dict[str, Any], *, dry_run: bool) -> Tuple[in
 
 
 def main() -> int:
-    global VERBOSE
+    global VERBOSE, LOG_PATH
     parser = argparse.ArgumentParser(description="Reconcile the instinct memory vault.")
     parser.add_argument("--no-llm", action="store_true", help="Layer A only (deterministic).")
     parser.add_argument("--date", help="Day to reconcile (YYYY-MM-DD). Default: today.")
@@ -536,6 +537,24 @@ def main() -> int:
     VERBOSE = args.verbose
 
     day = args.date or date.today().isoformat()
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        parser.error("--date must be YYYY-MM-DD")
+    if args.dry_run:
+        # Build projections in a throwaway copy, leaving even absent vaults untouched.
+        with tempfile.TemporaryDirectory(prefix="instinct-preview-") as temporary:
+            preview = Path(temporary) / "vault"
+            if VAULT_ROOT.exists():
+                shutil.copytree(VAULT_ROOT, preview, ignore=shutil.ignore_patterns(".git", ".locks"))
+            vault = Vault(preview)
+            vault.ensure()
+            old_log_path = LOG_PATH
+            LOG_PATH = preview / "raw" / "reconcile.log"
+            try:
+                return _run(vault, day, args)
+            finally:
+                LOG_PATH = old_log_path
     vault = Vault(VAULT_ROOT)
     vault.ensure()
 
