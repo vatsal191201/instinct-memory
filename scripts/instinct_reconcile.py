@@ -182,7 +182,15 @@ def rebuild_index(vault: Vault) -> None:
 
 
 def git(vault: Vault, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-c", "user.name=instinct-memory", "-c", "user.email=instinct-memory@users.noreply.github.com", *args], cwd=vault.root, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "-c", "user.name=instinct-memory", "-c",
+         "user.email=instinct-memory@users.noreply.github.com", *args],
+        cwd=vault.root, capture_output=True, text=True, check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "instinct-memory",
+             "GIT_AUTHOR_EMAIL": "instinct-memory@users.noreply.github.com",
+             "GIT_COMMITTER_NAME": "instinct-memory",
+             "GIT_COMMITTER_EMAIL": "instinct-memory@users.noreply.github.com"},
+    )
 
 
 def ensure_git(vault: Vault) -> None:
@@ -190,6 +198,12 @@ def ensure_git(vault: Vault) -> None:
         git(vault, "init", "-q", "-b", "main")
         git(vault, "config", "user.name", "instinct-memory")
         git(vault, "config", "user.email", "instinct-memory@users.noreply.github.com")
+
+    ignore = vault.root / ".gitignore"
+    existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    missing = [p for p in (".locks/", "*.lock", "raw/reconcile.log") if p not in existing.splitlines()]
+    if missing:
+        vault._atomic_write(ignore, existing.rstrip() + "\n" + "\n".join(missing) + "\n")
 
 
 def commit(vault: Vault, message: str) -> bool:
@@ -566,16 +580,12 @@ def main() -> int:
 
 
 def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        ensure_git(vault)
-
     log(f"reconcile {day} (dry_run={args.dry_run}, no_llm={args.no_llm})", always=True)
 
     raw_turns = vault.read_raw(day)
     pending_notes = [n for n in vault.read_jsonl("inbox.jsonl") if str(n.get("ts", "")).startswith(day)]
     if not raw_turns and not pending_notes:
-        log("no raw activity for this day — nothing to do", always=True)
-        return 2
+        log("no raw activity for this day — validating the vault", always=True)
 
     # ---- Layer A -----------------------------------------------------------
     log("Layer A (deterministic):")
@@ -588,11 +598,11 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
     if problems:
         for problem in problems:
             log(f"  ! {problem}", always=True)
-        if args.dry_run:
-            log("validation failed (dry run, not committing)", always=True)
-            return 1
+        log("validation failed — not committing", always=True)
+        return 1
 
     if not args.dry_run:
+        ensure_git(vault)
         touched = [f"timeline/daily/{day}.md"] if daily else []
         commit(
             vault,
@@ -629,6 +639,9 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
     post = vault.validate()
     for problem in post:
         log(f"  ! post-apply: {problem}", always=True)
+
+    if post or apply_problems:
+        return 1
 
     note = str(plan.get("notes", "")).strip()[:200]
     commit(

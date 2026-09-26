@@ -27,3 +27,16 @@ class ReconcilerTests(VaultTestCase):
         self.assertEqual(self.run_main('--dry-run'), 0)
         self.assertEqual(self.snapshot(), before)
         self.assertFalse((self.vault_path / '.git').exists())
+
+    def test_invalid_vault_never_commits(self):
+        path = self.vault_path / 'records/person/PERS-june.md'
+        path.write_text(path.read_text().replace('- jj\n', '- JJ\n'))
+        self.assertEqual(self.run_main(), 1)
+        self.assertFalse((self.vault_path / '.git').exists())
+
+    def test_validation_runs_without_activity(self):
+        (self.vault_path / 'raw' / (DAY + '.jsonl')).unlink()
+        (self.vault_path / 'raw/inbox.processed.jsonl').write_text('')
+        path = self.vault_path / 'records/person/PERS-june.md'
+        path.write_text('not a record')
+        self.assertEqual(self.run_main('--dry-run'), 1)
