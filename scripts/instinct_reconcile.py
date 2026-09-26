@@ -446,7 +446,75 @@ def build_prompt(vault: Vault, day: str, *, max_records: int) -> Tuple[str, str]
     return "\n".join(parts), [r.id for r in touched]
 
 
+def validate_plan(plan: Any) -> List[str]:
+    """Validate the JSON shape and operation inputs before opening any writer."""
+    if not _looks_like_plan(plan):
+        return ["plan.record_edits must be a list"]
+    problems = []
+    if set(plan) - set(PLAN_SCHEMA["properties"]):
+        problems.append("unknown plan field")
+    for key in ("onepager", "tasks", "notes"):
+        if key in plan and not isinstance(plan[key], str):
+            problems.append(f"{key} must be a string")
+    required = {
+        "create": ("type", "name"), "add_facts": ("id", "facts"),
+        "correct_fact": ("id", "old_text", "new_text"), "set_prose": ("id", "prose"),
+        "link": ("id", "links"), "shorten": ("id",),
+    }
+    fields = PLAN_SCHEMA["properties"]["record_edits"]["items"]["properties"]
+    for index, edit in enumerate(plan["record_edits"]):
+        label = f"edit {index}"
+        if not isinstance(edit, dict) or not isinstance(edit.get("op"), str) or edit["op"] not in required:
+            problems.append(f"{label}: unknown or missing operation")
+            continue
+        for key in required[edit["op"]]:
+            if key not in edit or not edit[key]:
+                problems.append(f"{label}: missing {key}")
+        for key, value in edit.items():
+            if key not in fields:
+                problems.append(f"{label}: unknown field {key}")
+            elif fields[key]["type"] == "array":
+                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                    problems.append(f"{label}: {key} must be a list of strings")
+            elif not isinstance(value, str):
+                problems.append(f"{label}: {key} must be a string")
+        if isinstance(edit.get("type"), str) and edit["type"] not in sch.RECORD_TYPES:
+            problems.append(f"{label}: invalid record type")
+        if isinstance(edit.get("aliases"), list):
+            if any(isinstance(alias, str) and alias != alias.lower() for alias in edit["aliases"]):
+                problems.append(f"{label}: aliases must be lowercase")
+    return problems
+
+
 def apply_plan(vault: Vault, plan: Dict[str, Any], *, dry_run: bool) -> Tuple[int, List[str]]:
+    """Validate the whole resulting vault in a copy before publishing atomic writes."""
+    problems = validate_plan(plan)
+    if problems:
+        return 0, problems
+    with tempfile.TemporaryDirectory(prefix="instinct-edits-") as temporary:
+        stage_root = Path(temporary) / "vault"
+        shutil.copytree(vault.root, stage_root, ignore=shutil.ignore_patterns(".git", ".locks"))
+        staged = Vault(stage_root, max_record_chars=vault.max_record_chars)
+        staged.ensure()
+        applied, problems = _apply_plan(staged, plan, dry_run=False)
+        problems.extend(staged.validate())
+        if problems:
+            return 0, problems
+        if not dry_run:
+            for rec in staged.load():
+                staged_path = staged.path_for(rec)
+                target = vault.path_for(rec)
+                if not target.exists() or target.read_bytes() != staged_path.read_bytes():
+                    vault.write(rec)
+            for filename in ("ONEPAGER.md", "TASKS.md"):
+                source = staged.root / filename
+                target = vault.root / filename
+                if source.exists() and (not target.exists() or target.read_bytes() != source.read_bytes()):
+                    vault._atomic_write(target, source.read_text(encoding="utf-8"))
+        return applied, []
+
+
+def _apply_plan(vault: Vault, plan: Dict[str, Any], *, dry_run: bool) -> Tuple[int, List[str]]:
     applied, problems = 0, []
     edits = plan.get("record_edits")
     if not isinstance(edits, list):
@@ -629,7 +697,7 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
 
     if args.dry_run:
         log("dry run — nothing written", always=True)
-        return 0
+        return 1 if apply_problems else 0
 
     rebuild_index(vault)
     post = vault.validate()
