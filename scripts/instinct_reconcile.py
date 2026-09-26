@@ -57,7 +57,6 @@ from instinctmem.retrieval import build_idf, query_tokens, score  # noqa: E402
 from instinctmem.vault import Vault  # noqa: E402
 
 VERBOSE = False
-CLI_CANDIDATES = ("claude", "codex", "grok")
 
 
 def log(msg: str, *, always: bool = False) -> None:
@@ -304,53 +303,35 @@ def _render_prompt_header() -> str:
 def _which(name: str) -> Optional[str]:
     from shutil import which
 
+    if name == "claude" and os.environ.get("INSTINCT_CLAUDE_BIN"):
+        return which(str(Path(os.environ["INSTINCT_CLAUDE_BIN"]).expanduser()))
     return which(name, path=os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".local" / "bin")]))
 
 
 def _llm_plan(prompt: str, *, timeout: int = 900) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Ask an available coding CLI for the edit plan. Returns (plan, backend_note)."""
-    schema_json = json.dumps(PLAN_SCHEMA)
-    attempts: List[str] = []
-
-    if _which("claude"):
-        cmd = [
-            "claude", "-p", prompt,
-            "--output-format", "json",
-            "--json-schema", schema_json,
-            "--max-turns", "1",
-            "--no-session-persistence",
-        ]
-        out, err = _exec_cli(cmd, timeout)
-        plan = _parse_claude(out)
-        if plan is not None:
-            return plan, "claude"
-        attempts.append(f"claude: {err[:200]}")
-
-    if _which("codex"):
-        # Codex has no --json-schema; ask for JSON in-band and extract the first object.
-        cmd = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
-               prompt + "\n\nReply with ONLY the JSON object. No prose, no code fences."]
-        out, err = _exec_cli(cmd, timeout)
-        plan = _extract_json(out)
-        if plan is not None:
-            return plan, "codex"
-        attempts.append(f"codex: {err[:200]}")
-
-    if _which("grok"):
-        cmd = ["grok", "-p", prompt + "\n\nReply with ONLY the JSON object. No prose, no code fences.",
-               "--output-format", "plain"]
-        out, err = _exec_cli(cmd, timeout)
-        plan = _extract_json(out)
-        if plan is not None:
-            return plan, "grok"
-        attempts.append(f"grok: {err[:200]}")
-
-    return None, "; ".join(attempts) if attempts else "no coding CLI found on PATH"
+    """Ask Claude Code for JSON with all file and external tools disabled."""
+    executable = _which("claude")
+    if not executable:
+        return None, "Claude Code CLI not found; set INSTINCT_CLAUDE_BIN or PATH"
+    cmd = [
+        executable, "-p", prompt,
+        "--output-format", "json", "--json-schema", json.dumps(PLAN_SCHEMA),
+        "--max-turns", "1", "--no-session-persistence",
+        "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--setting-sources", "", "--settings", '{"disableAllHooks":true}',
+    ]
+    out, err = _exec_cli(cmd, timeout)
+    plan = _parse_claude(out)
+    return (plan, "claude") if plan is not None else (None, f"claude: {err[:200]}")
 
 
 def _exec_cli(cmd: Sequence[str], timeout: int) -> Tuple[str, str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # Avoid inheriting project instructions or writing CLI state inside the vault.
+        with tempfile.TemporaryDirectory(prefix="instinct-plan-") as working:
+            proc = subprocess.run(cmd, cwd=working, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode:
+            return "", proc.stderr or f"CLI exited {proc.returncode}"
         return proc.stdout or "", proc.stderr or ""
     except subprocess.TimeoutExpired:
         return "", f"timed out after {timeout}s"
@@ -377,6 +358,8 @@ def _parse_claude(stdout: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
+            if payload.get("is_error"):
+                return None
             if _looks_like_plan(payload.get("structured_output")):
                 return payload["structured_output"]
             if _looks_like_plan(payload.get("result")):
