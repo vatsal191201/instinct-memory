@@ -226,7 +226,9 @@ def parse_record(text: str, path: Optional[str] = None) -> Record:
         id=record_id,
         name=str(fm.get("name", "")).strip(),
         type=record_type,
-        aliases=normalise_aliases(str(fm.get("name", "")).strip(), fm.get("aliases")),
+        # Preserve the stored spelling so validation can reject uppercase aliases.
+        # Only creation normalizes user input; parsing must not repair invalid data.
+        aliases=list(fm.get("aliases") or []) if isinstance(fm.get("aliases"), list) else [],
         created=str(fm.get("created", "")).strip(),
         updated=str(fm.get("updated", "")).strip(),
         sources=[str(s) for s in (fm.get("sources") or [])] if isinstance(fm.get("sources"), (list, tuple)) else [],
@@ -291,7 +293,9 @@ def validate_record(rec: Record, known_ids: Optional[set] = None) -> List[str]:
     if not rec.aliases:
         problems.append("no aliases (aliases are what make keyword retrieval work)")
     for alias in rec.aliases:
-        if alias != alias.lower():
+        if not isinstance(alias, str):
+            problems.append(f"alias {alias!r} is not a string")
+        elif alias != alias.lower():
             problems.append(f"alias {alias!r} is not lowercase")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", rec.created or ""):
         problems.append(f"created {rec.created!r} is not YYYY-MM-DD")

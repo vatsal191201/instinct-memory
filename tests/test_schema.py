@@ -25,6 +25,10 @@ class SchemaTests(VaultTestCase):
         self.assertTrue(any("dangling link [[PERS-missing]]" in p
             for p in schema.validate_record(record, known_ids=set(self.vault.index()))))
 
+    def test_uppercase_alias_is_rejected(self):
+        record = schema.parse_record(self.text().replace('- jj\n', '- JJ\n'))
+        self.assertTrue(any('not lowercase' in p for p in schema.validate_record(record)))
+
     def test_fallback_roundtrip(self):
         from instinct_memory import _frontmatter
         data = {"name": "June", "aliases": ["jj", "sam's colleague"], "sources": []}
