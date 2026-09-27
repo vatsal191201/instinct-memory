@@ -495,10 +495,28 @@ class Vault:
         """Append one JSON line under the same lock used by inbox consumption."""
         self.layout.raw.mkdir(parents=True, exist_ok=True)
         line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
-        path = self.layout.raw / name
         with self.lock("raw-" + name.replace(".jsonl", ""), blocking=True):
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(line)
+            self._append_jsonl_locked(name, [line.encode("utf-8")])
+
+    def _append_jsonl_locked(self, name: str, lines: Sequence[bytes], *, sync: bool = False) -> None:
+        """Append complete lines; the caller must hold this destination's raw lock.
+
+        JSONL allows the final object to lack LF. Validate that input before adding
+        a separator, so an interrupted or malformed tail is never silently repaired.
+        Ordinary LF-terminated logs need only a one-byte boundary check.
+        """
+        with (self.layout.raw / name).open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            separator = b""
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    self.read_jsonl(name)  # raises before writing any bytes on invalid input
+                    separator = b"\n"
+            handle.write(separator + b"".join(lines))
+            handle.flush()
+            if sync:
+                os.fsync(handle.fileno())
 
     def raw_daily_path(self, day: Optional[str] = None) -> Path:
         return self.layout.raw / f"{day or today()}.jsonl"
@@ -543,15 +561,20 @@ class Vault:
     ) -> int:
         """Archive only committed snapshot entries, preserving later appends and other days.
 
-        Call only after a successful commit. The same lock as append_raw covers the
-        read/archive/rewrite. Malformed lines remain queued for operator inspection.
+        Call only after a successful commit. Source and destination raw locks cover
+        the read/archive/rewrite. Malformed lines remain queued for operator inspection.
         """
+        if name == archive_name:
+            raise ValueError("inbox and archive must be different files")
         path = self.layout.raw / name
         wanted = None if entries is None else Counter(
             json.dumps(entry, sort_keys=True, ensure_ascii=False) for entry in entries
         )
-        lock_name = "raw-" + name.replace(".jsonl", "")
-        with self.lock(lock_name, blocking=True):
+        lock_names = {"raw-" + item.replace(".jsonl", "") for item in (name, archive_name)}
+        # A stable order also protects archive appends without introducing lock inversion.
+        with contextlib.ExitStack() as locks:
+            for lock_name in sorted(lock_names):
+                locks.enter_context(self.lock(lock_name, blocking=True))
             try:
                 content = path.read_bytes()
             except FileNotFoundError:
@@ -576,10 +599,7 @@ class Vault:
                     remaining.append(line)
             if not consumed:
                 return 0
-            with open(self.layout.raw / archive_name, "ab") as handle:
-                handle.writelines(consumed)
-                handle.flush()
-                os.fsync(handle.fileno())
+            self._append_jsonl_locked(archive_name, consumed, sync=True)
             self._atomic_write(path, b"".join(remaining))
         return len(consumed)
 

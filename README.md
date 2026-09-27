@@ -141,6 +141,8 @@ Before processing, the reconciler scans the selected day's raw turns, inbox, pro
 
 Record writes stop if an existing record cannot be inspected, parsed, or validated. Storage writers also stop on lock acquisition errors; only explicit nonblocking contention is a normal skip.
 
+Appending to a valid JSONL file whose final object lacks a newline first validates the input and adds the missing line separator. An invalid unterminated tail raises an error before any bytes are appended or inbox entries consumed. Archival holds both the inbox and archive locks while checking the boundary, appending, and replacing the inbox.
+
 All generated commits use `instinct-memory <instinct-memory@users.noreply.github.com>`. There is no push step. Exit codes: `0` completed (including deterministic-only success when Claude produces no plan), `1` validation failure or incomplete JSONL input, `2` another reconciler holds the lock (also used by argparse for invalid arguments), `3` runtime error, including I/O or lock system failures.
 
 For a nightly run at 22:00 in the cron daemon's timezone:
