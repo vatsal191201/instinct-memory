@@ -16,7 +16,7 @@ every durable write; the agent only ever reads):
 Ordering matters: the inbox is only truncated AFTER the commit succeeds, so a crash cannot
 lose a note the agent asked us to remember.
 
-Exit codes: 0 ok, 1 validation problems, 2 nothing to do, 3 error.
+Exit codes: 0 ok, 1 validation/input problems, 2 lock contention, 3 runtime error.
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ from instinctmem.retrieval import build_idf, query_tokens, score  # noqa: E402
 from instinctmem.vault import Vault  # noqa: E402
 
 VERBOSE = False
+JsonlInputs = Dict[str, List[Dict[str, Any]]]
 
 
 def log(msg: str, *, always: bool = False) -> None:
@@ -77,10 +78,11 @@ def log_error(msg: str) -> None:
 # --------------------------------------------------------------------------- Layer A
 
 
-def notes_for_day(vault: Vault, day: str) -> List[Dict[str, Any]]:
+def notes_for_day(vault: Vault, day: str, *, inputs: Optional[JsonlInputs] = None) -> List[Dict[str, Any]]:
     """Archived notes remain input so deterministic runs and later LLM replays agree."""
     return [n for name in ("inbox.processed.jsonl", "inbox.jsonl")
-            for n in vault.read_jsonl(name) if str(n.get("ts", "")).startswith(day)]
+            for n in (vault.read_jsonl(name) if inputs is None else inputs[name])
+            if str(n.get("ts", "")).startswith(day)]
 
 
 def archive_notes(vault: Vault, day: str, notes: List[Dict[str, Any]]) -> None:
@@ -91,12 +93,14 @@ def archive_notes(vault: Vault, day: str, notes: List[Dict[str, Any]]) -> None:
         commit(vault, f"reconcile {day}: archive {consumed} consumed inbox note(s)")
 
 
-def rollup_day(vault: Vault, day: str) -> Optional[Path]:
+def rollup_day(vault: Vault, day: str, *, inputs: Optional[JsonlInputs] = None) -> Optional[Path]:
     """Turn one day's raw JSONL into a timeline/daily/<day>.md rollup."""
-    turns = vault.read_raw(day)
-    notes = notes_for_day(vault, day)
+    turns = vault.read_raw(day) if inputs is None else inputs[f"{day}.jsonl"]
+    notes = notes_for_day(vault, day, inputs=inputs)
+    memory_input = (vault.read_jsonl("memory_tool_writes.jsonl") if inputs is None
+                    else inputs["memory_tool_writes.jsonl"])
     memories = [
-        m for m in vault.read_jsonl("memory_tool_writes.jsonl")
+        m for m in memory_input
         if str(m.get("ts", "")).startswith(day)
     ]
     if not turns and not notes and not memories:
@@ -395,7 +399,8 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def build_prompt(vault: Vault, day: str, *, max_records: int) -> Tuple[str, str]:
+def build_prompt(vault: Vault, day: str, *, max_records: int,
+                 inputs: Optional[JsonlInputs] = None) -> Tuple[str, str]:
     """Assemble the bounded prompt package; also returns the record ids it included."""
     parts = [_render_prompt_header()]
 
@@ -414,7 +419,7 @@ def build_prompt(vault: Vault, day: str, *, max_records: int) -> Tuple[str, str]
     else:
         parts.append(f"\n===== timeline/daily/{day}.md =====\n(no activity recorded)")
 
-    notes = notes_for_day(vault, day)
+    notes = notes_for_day(vault, day, inputs=inputs)
     if notes:
         rendered = "\n".join(
             f"- {n.get('text')}" + (f"  [about: {n.get('about')}]" if n.get("about") else "") for n in notes
@@ -644,14 +649,30 @@ def main() -> int:
 def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
     log(f"reconcile {day} (dry_run={args.dry_run}, no_llm={args.no_llm})", always=True)
 
-    raw_turns = vault.read_raw(day)
-    pending_notes = [n for n in vault.read_jsonl("inbox.jsonl") if str(n.get("ts", "")).startswith(day)]
+    # Inspect every input before projections, commits, model calls or inbox consumption.
+    # Reuse this snapshot throughout the run so late appends cannot change its plan.
+    scans = [vault.inspect_jsonl(name) for name in (
+        f"{day}.jsonl", "inbox.jsonl", "inbox.processed.jsonl", "memory_tool_writes.jsonl",
+    )]
+    for scan in scans:
+        log(scan.summary(), always=True)
+        for error in scan.errors:
+            log_error(error)
+    valid = sum(len(scan.entries) for scan in scans)
+    failed = sum(len(scan.errors) for scan in scans)
+    log(f"JSONL inputs: {valid + failed} nonblank = {valid} valid + {failed} failed", always=True)
+    if failed:
+        log_error("incomplete input — no projections, commits or inbox consumption performed")
+        return 1
+    inputs = {scan.path.name: scan.entries for scan in scans}
+    raw_turns = inputs[f"{day}.jsonl"]
+    pending_notes = [n for n in inputs["inbox.jsonl"] if str(n.get("ts", "")).startswith(day)]
     if not raw_turns and not pending_notes:
         log("no raw activity for this day — validating the vault", always=True)
 
     # ---- Layer A -----------------------------------------------------------
     log("Layer A (deterministic):")
-    daily = rollup_day(vault, day)
+    daily = rollup_day(vault, day, inputs=inputs)
     if daily is not None:
         rollup_week(vault, iso_week(day))
     rebuild_index(vault)
@@ -680,7 +701,7 @@ def _run(vault: Vault, day: str, args: argparse.Namespace) -> int:
 
     # ---- Layer B -----------------------------------------------------------
     log("Layer B (semantic):")
-    prompt, included = build_prompt(vault, day, max_records=args.max_records)
+    prompt, included = build_prompt(vault, day, max_records=args.max_records, inputs=inputs)
     log(f"  prompt={len(prompt)} chars, {len(included)} record bodies included")
     plan, backend = _llm_plan(prompt)
     if plan is None:

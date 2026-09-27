@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import fcntl
 import json
 import logging
@@ -29,7 +30,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from .schema import (
     DEFAULT_MAX_RECORD_CHARS,
@@ -60,6 +61,38 @@ INDEX_FILE = "INDEX.md"
 
 def today() -> str:
     return date.today().isoformat()
+
+
+@dataclass
+class JsonlReadResult:
+    """One input scan: every nonblank physical line is valid or failed."""
+
+    path: Path
+    entries: List[Dict[str, Any]]
+    errors: List[str]
+
+    @property
+    def nonblank(self) -> int:
+        return len(self.entries) + len(self.errors)
+
+    def summary(self) -> str:
+        return (f"{self.path.name}: {self.nonblank} nonblank = "
+                f"{len(self.entries)} valid + {len(self.errors)} failed")
+
+
+class JsonlError(ValueError):
+    """A JSONL read was incomplete; partial entries must not look like success."""
+
+    def __init__(self, result: JsonlReadResult):
+        self.result = result
+        super().__init__(result.summary() + "\n" + "\n".join(result.errors))
+
+
+def _jsonl_object(line: bytes) -> Dict[str, Any]:
+    value = json.loads(line.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
 
 
 @dataclass(frozen=True)
@@ -137,7 +170,9 @@ class Vault:
     @contextlib.contextmanager
     def lock(self, name: str, *, blocking: bool = True) -> Iterator[bool]:
         """Advisory ``flock`` on ``.locks/<name>.lock``. Yields False when ``blocking=False``
-        and the lock is already held (callers use that to skip duplicate work)."""
+        and the lock is already held (callers use that to skip duplicate work).
+        All other acquisition errors propagate before entering the caller's body.
+        """
         self.layout.locks.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
         path = self.layout.locks / f"{safe}.lock"
@@ -148,14 +183,16 @@ class Vault:
             try:
                 fcntl.flock(handle.fileno(), flags)
                 acquired = True
-            except (BlockingIOError, OSError):
-                acquired = False
+            except OSError as exc:
+                if blocking or exc.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
             yield acquired
         finally:
-            if acquired:
-                with contextlib.suppress(Exception):
+            try:
+                if acquired:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
+            finally:
+                handle.close()
 
     # ------------------------------------------------------------------- reads
 
@@ -195,16 +232,26 @@ class Vault:
         This is what ``write()`` checks against. Using ``find()`` here would let a caller that
         mutated a cached object walk straight past the history guard.
         """
-        if not record_id:
-            return None
-        for path in self.record_paths():
-            if path.stem == record_id:
-                try:
-                    return parse_record(path.read_text(encoding="utf-8"), path=str(path))
-                except (RecordError, OSError) as exc:
-                    logger.warning("instinct: could not re-read %s: %s", path, exc)
-                    return None
-        return None
+        previous = None
+        # Probe known paths directly: glob/is_file may hide inspection failures.
+        # Only an absent path is absence; unreadable or corrupt data must stop writes.
+        for record_type in RECORD_TYPES:
+            path = self.layout.type_dir(record_type) / f"{record_id}.md"
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            text = path.read_text(encoding="utf-8")
+            rec = parse_record(text, path=str(path))
+            problems = validate_record(rec)
+            if rec.id != record_id or rec.type != record_type:
+                problems.append("path does not match record id/type")
+            if previous is not None:
+                problems.append("duplicate record id")
+            if problems:
+                raise RecordError(f"{path}: " + "; ".join(problems))
+            previous = rec
+        return previous
 
     def index(self) -> Dict[str, Record]:
         return {r.id: r for r in self.load_refs() if r.id}
@@ -299,11 +346,12 @@ class Vault:
             raise RecordError(f"unknown record type {rec.type!r} for id {rec.id}")
         return self.layout.type_dir(rec.type) / f"{rec.id}.md"
 
-    def _atomic_write(self, path: Path, text: str) -> None:
+    def _atomic_write(self, path: Path, text: Union[str, bytes]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".md")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            options = {} if isinstance(text, bytes) else {"encoding": "utf-8"}
+            with os.fdopen(fd, "wb" if isinstance(text, bytes) else "w", **options) as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -444,8 +492,7 @@ class Vault:
     # -------------------------------------------------------------------- raw
 
     def append_raw(self, name: str, payload: Dict[str, Any]) -> None:
-        """Append one JSON line. Append-only, never rewritten, safe under concurrent writers
-        because a single ``O_APPEND`` write of a short line is atomic on POSIX."""
+        """Append one JSON line under the same lock used by inbox consumption."""
         self.layout.raw.mkdir(parents=True, exist_ok=True)
         line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
         path = self.layout.raw / name
@@ -457,34 +504,38 @@ class Vault:
         return self.layout.raw / f"{day or today()}.jsonl"
 
     def read_raw(self, day: Optional[str] = None) -> List[Dict[str, Any]]:
-        path = self.raw_daily_path(day)
-        if not path.exists():
-            return []
-        out: List[Dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return out
+        return self.read_jsonl(self.raw_daily_path(day).name)
 
     def read_jsonl(self, name: str) -> List[Dict[str, Any]]:
+        """Read JSON objects, raising with line diagnostics on incomplete input."""
+        result = self.inspect_jsonl(name)
+        if result.errors:
+            raise JsonlError(result)
+        return result.entries
+
+    def inspect_jsonl(self, name: str) -> JsonlReadResult:
+        """Scan without changing bytes or silently replacing invalid UTF-8.
+
+        Callers using this diagnostic API must check errors before processing entries.
+        Missing files are empty inputs; other I/O failures propagate.
+        """
         path = self.layout.raw / name
-        if not path.exists():
-            return []
-        out: List[Dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return out
+        result = JsonlReadResult(path, [], [])
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            if path.is_symlink():
+                raise
+            return result
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    result.entries.append(_jsonl_object(line))
+                except (UnicodeDecodeError, ValueError) as exc:
+                    result.errors.append(f"{path}:{number}: {exc}")
+        return result
 
     def consume_jsonl(
         self, name: str, *, archive_name: str = "inbox.processed.jsonl",
@@ -501,28 +552,35 @@ class Vault:
         )
         lock_name = "raw-" + name.replace(".jsonl", "")
         with self.lock(lock_name, blocking=True):
-            if not path.exists():
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError:
+                if path.is_symlink():
+                    raise
                 return 0
             consumed, remaining = [], []
-            for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+            # Split only at physical LF boundaries; retain CRLF and undecodable bytes.
+            lines = content.split(b"\n")
+            for index, part in enumerate(lines):
+                line = part + b"\n" if index < len(lines) - 1 else part
                 try:
-                    key = json.dumps(json.loads(line), sort_keys=True, ensure_ascii=False)
-                except json.JSONDecodeError:
+                    key = json.dumps(_jsonl_object(line), sort_keys=True, ensure_ascii=False)
+                except (UnicodeDecodeError, ValueError):
                     remaining.append(line)
                     continue
                 if wanted is None or wanted[key] > 0:
-                    consumed.append(line if line.endswith("\n") else line + "\n")
+                    consumed.append(line if line.endswith(b"\n") else line + b"\n")
                     if wanted is not None:
                         wanted[key] -= 1
                 else:
                     remaining.append(line)
             if not consumed:
                 return 0
-            with open(self.layout.raw / archive_name, "a", encoding="utf-8") as handle:
+            with open(self.layout.raw / archive_name, "ab") as handle:
                 handle.writelines(consumed)
                 handle.flush()
                 os.fsync(handle.fileno())
-            self._atomic_write(path, "".join(remaining))
+            self._atomic_write(path, b"".join(remaining))
         return len(consumed)
 
     # --------------------------------------------------------------- timeline

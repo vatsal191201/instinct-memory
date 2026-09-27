@@ -137,7 +137,11 @@ The semantic layer requires an authenticated [Claude Code CLI](https://code.clau
 
 Inbox entries for the selected day are archived only after their rollup or semantic work has committed. Other days and notes arriving during a run remain queued. `--no-llm` archives proposals as durable timeline input; it does not turn them into record facts. Archived proposals remain replayable with a later full `--date` run. If Claude is unavailable or returns no plan during a full run, deterministic work is kept and pending notes remain queued.
 
-All generated commits use `instinct-memory <instinct-memory@users.noreply.github.com>`. There is no push step. Exit codes: `0` completed, `1` validation failure, `2` another reconciler holds the lock, `3` runtime error.
+Before processing, the reconciler scans the selected day's raw turns, inbox, processed inbox, and memory-tool log. It reports per-file and total nonblank line counts as `valid + failed`; these are input validation counts, including archived and other-day entries, not counts of new facts. Malformed JSON, invalid UTF-8, and non-object JSON values produce file/line diagnostics on stderr and exit `1`, before any projections, commits, model calls, or inbox consumption. Input bytes are preserved; there is no automatic repair. Valid runs use the checked snapshot, leaving later appends for a subsequent run. This replaces the earlier behavior that silently skipped malformed lines and returned success.
+
+Record writes stop if an existing record cannot be inspected, parsed, or validated. Storage writers also stop on lock acquisition errors; only explicit nonblocking contention is a normal skip.
+
+All generated commits use `instinct-memory <instinct-memory@users.noreply.github.com>`. There is no push step. Exit codes: `0` completed (including deterministic-only success when Claude produces no plan), `1` validation failure or incomplete JSONL input, `2` another reconciler holds the lock (also used by argparse for invalid arguments), `3` runtime error, including I/O or lock system failures.
 
 For a nightly run at 22:00 in the cron daemon's timezone:
 
